@@ -1,0 +1,286 @@
+// source from https://github.com/abinnovision/recaptcha-v3/blob/0098ab94871e6a1a57f8f70fd6349f716f0697ce/src/ReCaptchaLoader.ts
+import { ReCaptchaInstance } from "./instance";
+
+enum ELoadingState {
+	NOT_LOADED,
+	LOADING,
+	LOADED,
+}
+
+/**
+ * This is a loader which takes care about loading the
+ * official recaptcha script (https://www.google.com/recaptcha/api.js).
+ *
+ * The main method {@link ReCaptchaLoader#load(siteKey: string)} also
+ * prevents loading the recaptcha script multiple times.
+ */
+class ReCaptchaLoader {
+	private static loadingState: ELoadingState | null = null;
+	private static instance: ReCaptchaInstance | null = null;
+	private static instanceSiteKey: string | null = null;
+
+	private static successfulLoadingConsumers: Array<
+		(instance: ReCaptchaInstance) => void
+	> = [];
+	private static errorLoadingRunnable: Array<(reason: Error) => void> = [];
+
+	/**
+	 * Loads the recaptcha library with the given site key.
+	 *
+	 * @param siteKey The site key to load the library with.
+	 * @param options The options for the loader
+	 * @return The recaptcha wrapper.
+	 */
+	// eslint-disable-next-line @typescript-eslint/promise-function-async
+	public static load(
+		siteKey: string,
+		options: IReCaptchaLoaderOptions = {}
+	): Promise<ReCaptchaInstance> {
+		// Browser environment
+		if (typeof document === "undefined") {
+			return Promise.reject(new Error("This is a library for the browser!"));
+		}
+
+		// Check if grecaptcha is already registered.
+		if (ReCaptchaLoader.getLoadingState() === ELoadingState.LOADED) {
+			// Check if the site key is equal to the already loaded instance
+			if (ReCaptchaLoader.instance && ReCaptchaLoader.instance.getSiteKey() === siteKey) {
+				// Resolve existing instance
+				return Promise.resolve(ReCaptchaLoader.instance);
+			} else {
+				// Reject because site keys are different
+				return Promise.reject(
+					new Error("reCAPTCHA already loaded with different site key!")
+				);
+			}
+		}
+
+		// If the recaptcha is loading add this loader to the queue.
+		if (ReCaptchaLoader.getLoadingState() === ELoadingState.LOADING) {
+			// Check if the site key is equal to the current loading site key
+			if (siteKey !== ReCaptchaLoader.instanceSiteKey) {
+				return Promise.reject(
+					new Error("reCAPTCHA already loaded with different site key!")
+				);
+			}
+
+			return new Promise<ReCaptchaInstance>((resolve, reject) => {
+				ReCaptchaLoader.successfulLoadingConsumers.push(
+					(instance: ReCaptchaInstance) => resolve(instance)
+				);
+				ReCaptchaLoader.errorLoadingRunnable.push((reason: Error) =>
+					reject(reason)
+				);
+			});
+		}
+
+		const renderParameters = options.renderParameters ? {
+			...options.renderParameters,
+		} : {}
+
+		renderParameters["render"] = siteKey;
+
+		// Set states
+		ReCaptchaLoader.instanceSiteKey = siteKey;
+		ReCaptchaLoader.setLoadingState(ELoadingState.LOADING);
+
+		// Throw error if the recaptcha is already loaded
+		const loader = new ReCaptchaLoader();
+	
+		return new Promise((resolve, reject) => {
+			// eslint-disable-next-line @typescript-eslint/strict-boolean-expressions
+			loader
+				.loadScript(
+					options.useRecaptchaNet || false,
+					options.useEnterprise || false,
+					renderParameters,
+					options.customUrl
+				)
+				.then(() => {
+					ReCaptchaLoader.setLoadingState(ELoadingState.LOADED);
+
+					// eslint-disable-next-line no-undef
+					const recaptcha = (
+						grecaptcha && grecaptcha.enterprise 
+						? grecaptcha.enterprise
+						: grecaptcha
+					)
+					const instance = new ReCaptchaInstance(siteKey, recaptcha);
+					ReCaptchaLoader.successfulLoadingConsumers.forEach((v) =>
+						v(instance)
+					);
+					ReCaptchaLoader.successfulLoadingConsumers = [];
+
+					ReCaptchaLoader.instance = instance;
+					resolve(instance);
+				})
+				.catch((error) => {
+					ReCaptchaLoader.errorLoadingRunnable.forEach((v) => v(error));
+					ReCaptchaLoader.errorLoadingRunnable = [];
+					reject(error);
+				});
+		});
+	}
+
+	public static getInstance(): ReCaptchaInstance | null {
+		return ReCaptchaLoader.instance;
+	}
+
+	/**
+	 * Will set the loading state of the recaptcha script.
+	 *
+	 * @param state New loading state for the loading process.
+	 */
+	private static setLoadingState(state: ELoadingState): void {
+		ReCaptchaLoader.loadingState = state;
+	}
+
+	/**
+	 * Will return the current loading state. If no loading state is globally set
+	 * the NO_LOADED state is set as default.
+	 */
+	private static getLoadingState(): ELoadingState {
+		if (ReCaptchaLoader.loadingState === null) {
+			return ELoadingState.NOT_LOADED;
+		} else {
+			return ReCaptchaLoader.loadingState;
+		}
+	}
+
+	/**
+	 * The actual method that loads the script.
+	 * This method will create a new script element
+	 * and append it to the "<head>" element.
+	 *
+	 * @param useRecaptchaNet If the loader should use "recaptcha.net" instead of "google.com"
+	 * @param useEnterprise If provided the loader should use the enterprise version of the reCAPTCHA api.
+	 * @param renderParameters Additional parameters for reCAPTCHA.
+	 * @param customUrl If the loader custom URL insted of the official recaptcha URLs
+	 */
+	// eslint-disable-next-line max-params
+	private loadScript(
+		useRecaptchaNet = false,
+		useEnterprise = false,
+		renderParameters: { [key: string]: any } = {},
+		customUrl = ""
+	): Promise<HTMLScriptElement> {
+		// Create script element
+		const scriptElement: HTMLScriptElement = document.createElement("script");
+		scriptElement.async = true;
+		// scriptElement.defer = true;
+		scriptElement.setAttribute("recaptcha-v3-script", "");
+
+		let scriptBase = `https://www.google.com/recaptcha/api.js`;
+
+		if (useRecaptchaNet) {
+			if (useEnterprise) {
+				scriptBase = "https://recaptcha.net/recaptcha/enterprise.js";
+			} else {
+				scriptBase = "https://recaptcha.net/recaptcha/api.js";
+			}
+		}
+
+		if (useEnterprise) {
+			scriptBase = "https://www.google.com/recaptcha/enterprise.js";
+		}
+
+		if (customUrl) {
+			scriptBase = customUrl;
+		}
+
+		// Build parameter query string
+		const parametersQuery = this.buildQueryString(renderParameters);
+
+		scriptElement.src = scriptBase + parametersQuery;
+
+		return new Promise<HTMLScriptElement>((resolve, reject) => {
+			scriptElement.addEventListener(
+				"load",
+				() => {
+					resolve(scriptElement);
+				},
+				false
+			);
+			scriptElement.onerror = (error): void => {
+				ReCaptchaLoader.setLoadingState(ELoadingState.NOT_LOADED);
+				reject(error);
+			};
+			document.head.appendChild(scriptElement);
+		});
+	}
+
+	/**
+	 * Will build a query string from the given parameters and return
+	 * the built string. If parameters has no keys it will just return
+	 * an empty string.
+	 *
+	 * @param parameters Object to build query string from.
+	 */
+	private buildQueryString(parameters: { [key: string]: string }): string {
+		const parameterKeys = Object.keys(parameters);
+
+		// If there are no parameters just return an empty string.
+		if (parameterKeys.length < 1) {
+			return "";
+		}
+
+		// Build the actual query string (KEY=VALUE).
+		return (
+			"?" +
+			Object.keys(parameters)
+				.filter((parameterKey) => {
+					return !!parameters[parameterKey];
+				})
+				.map((parameterKey) => {
+					return parameterKey + "=" + parameters[parameterKey];
+				})
+				.join("&")
+		);
+	}
+}
+
+/**
+ * An interface for all available options for the
+ * reCAPTCHA loader.
+ */
+export interface IReCaptchaLoaderOptions {
+	/**
+	 * By default the loader uses "google.com", with this
+	 * option set to `true` it will use "recaptcha.net".
+	 * (See: https://github.com/AurityLab/recaptcha-v3/pull/2)
+	 */
+	useRecaptchaNet?: boolean;
+
+	/**
+	 * By default the loader uses "https://www.google.com/recaptcha/api.js" api src, with this
+	 * option set to `true` it will use "https://www.google.com/recaptcha/enterprise.js"
+	 * api src instead which is the enterprise version of recaptcha API. The loader will also handle differences
+	 * in response.
+	 */
+	useEnterprise?: boolean;
+
+	/**
+	 * Defines additional parameters for the rendering process.
+	 * The parameters should be defined as key/value pair.
+	 *
+	 * Known possible parameters:
+	 * `hl` -> Will set the language of the badge.
+	 */
+	renderParameters?: { [key: string]: string };
+
+	/**
+	 * Defines a custom url for ReCaptcha JS file.
+	 * Useful when self hosting or proxied ReCaptcha JS file.
+	 * https://github.com/AurityLab/recaptcha-v3/issues/76
+	 */
+	customUrl?: string;
+}
+
+
+
+/**
+ * Only export the recaptcha load and getInstance method to
+ * avoid confusion with the class constructor.
+ */
+export const load = ReCaptchaLoader.load;
+export const getInstance = ReCaptchaLoader.getInstance;
